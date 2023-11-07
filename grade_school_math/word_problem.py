@@ -4,7 +4,7 @@ import nltk
 from word2number import w2n
 import pprint
 
-from typing import Tuple, Union, Self, List
+from typing import Tuple, Self, List
 
 import numeral
 
@@ -31,6 +31,20 @@ class WordProblem:
             self.text_step_quantities,
             self.calculation_step_quantities,
         ) = self.decompose_answer(self.a_raw)
+        # (self.program,) = self.assemble_program(
+        #     self.missing_calculations,
+        #     self.q_quantities,
+        #     self.text_step_quantities,
+        #     self.calculation_step_quantities,
+        #     self.calculation_steps,
+        #     self.solution,
+        # )
+        # self.missing_calculations = self.detect_missing_calculations(
+        #     self.q_quantities,
+        #     self.text_step_quantities,
+        #     self.calculation_step_quantities,
+        #     self.solution,
+        # )
 
     def tidy(self, s):
         return s.replace("\u2013", "-")
@@ -59,7 +73,7 @@ class WordProblem:
         return numeric_quantities, quantities
 
     def preprocess(self, s):
-        return s.replace("-", " ")
+        return re.sub(rf"(?!{INT_OR_FLT})(-)(?!{INT_OR_FLT})", " ", s)
 
     def extract_digitized(self, token) -> List[float]:
         ratio = re.findall(rf"({RATIO})", token)
@@ -168,6 +182,21 @@ class WordProblem:
             text_step_quantities,
             calculation_step_quantities,
         )
+
+    def detect_missing_calculations(
+        self, q_quantities, text_step_quantities, calculation_step_quantities, solution
+    ):
+        pass
+
+    def assemble_program(
+        self,
+        q_quantities,
+        text_step_quantities,
+        calculation_step_quantities,
+        calculation_steps,
+        solution,
+    ):
+        pass
 
     @classmethod
     def from_json(cls, j) -> Self:
