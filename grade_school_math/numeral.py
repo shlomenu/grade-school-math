@@ -137,8 +137,8 @@ ORDINAL = {
 
 PARTITIVE = {
     "whole": 1,
-    "half": Fraction(1, 2),
-    "quarter": Fraction(1, 4),
+    "half": 2,
+    "quarter": 4,
 }
 
 INCIDENTAL = {"second"}

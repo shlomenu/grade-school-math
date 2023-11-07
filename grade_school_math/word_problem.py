@@ -2,60 +2,48 @@ import re
 import json
 import nltk
 from word2number import w2n
+import pprint
 
-from typing import Optional, Tuple, Union, Self, List
+from typing import Tuple, Union, Self, List
 
-from fractions import Fraction
 import numeral
 
 nltk.download("punkt")
 
 INT_OR_FLT = r"\d+(?:\.\d+)?"
-FRAC = rf"{INT_OR_FLT}/{INT_OR_FLT}"
+RATIO = rf"{INT_OR_FLT}/{INT_OR_FLT}|{INT_OR_FLT}:{INT_OR_FLT}"
+SOLUTION_QUANT = r"\#\#\#\#\s*(\S+)\s*"
+CALCULATION = r"<<([^<>]+=[^<>]+)>>"
 
 
 class WordProblem:
     def __init__(self, question, answer):
-        self.q_raw = question
-        self.a_raw = answer
+        self.q_raw, self.a_raw = self.tidy(question), self.tidy(answer)
         self.q_numeric_quantities, self.q_quantities = self.decompose_question(
             self.q_raw
         )
-        # decompose answer
-        a_parts = answer.split("\n")
-        self.sol = float(
-            re.findall(r"\#\#\#\#\s*(\S+)\s*", a_parts[-1].replace(",", ""))[0]
-        )
-        self.clar, self.steps_raw = [], []
-        for part in a_parts[:-1]:
-            q_soc, a_soc = part.split("**")
-            self.clar.append(q_soc.strip())
-            self.steps_raw.append((a_soc.strip()))
-        self.steps, self.calcs = [], []
-        self.step_quantities, self.calc_quantities = [], []
-        for step_raw in self.steps_raw:
-            step = re.sub(r"<<([^<>]+=[^<>]+)>>", "", step_raw)
-            self.steps.append(step)
-            self.step_quantities.append(re.findall(r"\d+(?:\.\d+)?", step))
-            calc = re.findall(r"<<([^<>]+=[^<>]+)>>", step_raw)
-            self.calcs.append(calc)
-            quantities = []
-            for c in calc:
-                quantities.extend(re.findall(r"\d+(?:\.\d+)?", c))
-            self.calc_quantities.append(quantities)
+        (
+            self.solution,
+            self.socratic_questions,
+            self.calculation_annotated_steps,
+            self.text_steps,
+            self.calculation_steps,
+            self.text_step_quantities,
+            self.calculation_step_quantities,
+        ) = self.decompose_answer(self.a_raw)
 
-    #         self.q_quantities = self.extract_numerals(self.q_raw)
-    #         self.
+    def tidy(self, s):
+        return s.replace("\u2013", "-")
 
     def decompose_question(self, raw):
-        raw = raw.replace("-", "")
+        raw = self.preprocess(raw)
         numeric_quantities, quantities, numeral_seq = [], [], False
         for token, tag in nltk.pos_tag(nltk.tokenize.word_tokenize(raw)):
             quantity = self.extract_digitized(token.replace(",", ""))
             if quantity is not None:
                 numeral_seq = False
-                numeric_quantities.append(quantity)
-                quantities.append(quantity)
+                numeric_quantities.extend(quantity)
+                quantities.extend(quantity)
             elif token in numeral.NUMERAL:
                 if not numeral_seq:
                     numeral_seq = True
@@ -64,45 +52,40 @@ class WordProblem:
                     quantities[-1].append((token, tag))
             elif numeral_seq:
                 numeral_seq = False
-                number = self.parse_numeral(quantities[-1])
-                if number is not None:
-                    quantities[-1] = number
-                else:
-                    del quantities[-1]
+                numbers = self.parse_numeral(quantities[-1])
+                del quantities[-1]
+                if numbers:
+                    quantities.extend(numbers)
         return numeric_quantities, quantities
 
-    def extract_digitized(self, token) -> Optional[Union[float, Fraction]]:
-        """
-        Check if a digitized quantity exists within a token;
-        currently detects numbers and fractions written with a slash.
-        """
-        frac = re.findall(rf"({FRAC})", token)
-        if len(frac) not in (0, 1):
-            print("warning: misshapen fraction:", frac, token)
-            return None
-        elif len(frac) == 1:
-            elts = re.findall(INT_OR_FLT, frac[0])
-            if len(elts) != 2:
-                print("warning: misshapen fraction:", frac, token)
-                return None
-            else:
-                return Fraction(numerator=int(elts[0]), denominator=int(elts[1]))
-        elif len(frac) == 0:
-            number = re.findall(INT_OR_FLT, token)
-            if len(number) > 1:
-                print("warning: misshapen number:", number, token)
-                return None
-            elif len(number) == 1:
-                return float(number[0])
+    def preprocess(self, s):
+        return s.replace("-", " ")
 
-    def parse_numeral(
-        self, tagged_numerals: List[Tuple[str, str]]
-    ) -> List[Union[float, Fraction]]:
-        numerals, tags = (e[0] for e in tagged_numerals), (
+    def extract_digitized(self, token) -> List[float]:
+        ratio = re.findall(rf"({RATIO})", token)
+        if len(ratio) not in (0, 1):
+            raise ValueError(f"misshapen ratio: {ratio}, {token}")
+        elif len(ratio) == 1:
+            elts = re.findall(INT_OR_FLT, ratio[0])
+            if len(elts) != 2:
+                raise ValueError(f"misshapen ratio: {ratio}, {token}")
+            else:
+                return [float(elts[0]), float(elts[1])]
+        elif len(ratio) == 0:
+            number = re.findall(rf"({INT_OR_FLT})[^0-9]?.*", token)
+            if len(number) > 1:
+                raise ValueError(f"misshapen number: {number}, {token}")
+            elif len(number) == 1:
+                return [float(number[0])]
+
+    def parse_numeral(self, tagged_numerals: List[Tuple[str, str]]) -> List[float]:
+        numerals, tags = [e[0] for e in tagged_numerals], [
             e[1] for e in tagged_numerals
-        )
+        ]
         if tags[-1].startswith("NN") and numerals[-1] in numeral.INCIDENTAL:
             numerals, tags = numerals[:-1], tags[:-1]
+            if len(numerals) == 0:
+                return []
         if len(numerals) > 1 and "JJ" in tags and tags[-1] != "JJ":
             i = tags.index("JJ") + 1
             return self.parse_numeral(
@@ -112,38 +95,88 @@ class WordProblem:
             return [numeral.NUMERAL[numerals[0]]]
         else:
             if self.cardinal(numerals):
-                return [float(w2n.word_to_num(" ".join(numerals)))]
+                return [float(self.safe_word_to_num(" ".join(numerals)))]
             elif self.cardinal(numerals[:-1]):
                 final = (
                     numerals[-1:][:-1] if numerals[-1].endswith("s") else numerals[-1]
                 )
                 if final in numeral.ORDINAL:
-                    if tags[-1].startswith("NN"):
+                    if not tags[-1].startswith("JJ"):
                         return [
-                            Fraction(
-                                numerator=int(w2n.word_to_num(" ".join(numerals[:-1]))),
-                                denominator=numeral.ORDINAL[final],
-                            )
+                            float(self.safe_word_to_num(" ".join(numerals[:-1]))),
+                            float(numeral.ORDINAL[final]),
                         ]
-                    elif tags[-1] == "JJ":
-                        numerals = numerals[:-1] + numeral.ORDINAL_TO_CARDINAL[final]
-                        return [float(w2n.word_to_num(" ".join(numerals)))]
                     else:
-                        print("warning: malformed numerals:", tagged_numerals)
-                        return []
+                        numerals = numerals[:-1] + [numeral.ORDINAL_TO_CARDINAL[final]]
+                        return [float(self.safe_word_to_num(" ".join(numerals)))]
 
     @staticmethod
     def cardinal(tokens):
         return False not in [token in numeral.CARDINAL for token in tokens]
 
     @classmethod
+    def safe_word_to_num(cls, s):
+        try:
+            return w2n.word_to_num(s)
+        except Exception as e:
+            print(f"w2n.word_to_num failed on: {s}")
+            raise e
+
+    def decompose_answer(
+        self, raw: str
+    ) -> Tuple[
+        float,
+        List[str],
+        List[str],
+        List[str],
+        List[str],
+        List[List[float]],
+        List[List[float]],
+    ]:
+        lines = self.preprocess(raw).split("\n")
+        solution_quantities = re.findall(SOLUTION_QUANT, lines[-1].replace(",", ""))
+        if len(solution_quantities) != 1:
+            raise ValueError(
+                f"multiple quantities found in solution line: {solution_quantities}: {raw}"
+            )
+        solution, exchanges = float(solution_quantities[0]), lines[:-1]
+        socratic_questions, calculation_annotated_steps = [], []
+        for exchange in exchanges:
+            q, a = exchange.split("**")
+            socratic_questions.append(q.strip())
+            calculation_annotated_steps.append((a.strip()))
+        text_steps, calculation_steps = [], []
+        text_step_quantities, calculation_step_quantities = [], []
+        for calculation_annotated_step in calculation_annotated_steps:
+            text_step = re.sub(CALCULATION, "", calculation_annotated_step)
+            text_steps.append(text_step)
+            text_step_quantities.append(
+                [float(t) for t in re.findall(INT_OR_FLT, text_step)]
+            )
+            calculation_step = re.findall(CALCULATION, calculation_annotated_step)
+            calculation_steps.append(calculation_step)
+            quantities = []
+            for c in calculation_step:
+                quantities.extend((float(t) for t in re.findall(INT_OR_FLT, c)))
+            calculation_step_quantities.append(quantities)
+        return (
+            solution,
+            socratic_questions,
+            calculation_annotated_steps,
+            text_steps,
+            calculation_steps,
+            text_step_quantities,
+            calculation_step_quantities,
+        )
+
+    @classmethod
     def from_json(cls, j) -> Self:
         return cls(question=j["question"], answer=j["answer"])
 
     @classmethod
-    def from_file(cls, path) -> List[Self]:
+    def from_file(cls, path, encoding="utf-8") -> List[Self]:
         wps = []
-        with open(path) as f:
+        with open(path, encoding=encoding) as f:
             for line in f.readlines():
                 if line:
                     try:
@@ -152,3 +185,21 @@ class WordProblem:
                         print("line:", line)
                         raise e
         return wps
+
+    def __str__(self):
+        return pprint.pformat(
+            (
+                ("q_raw", self.q_raw),
+                ("a_raw", self.a_raw),
+                ("q_numeric_quantities", self.q_numeric_quantities),
+                ("q_quantities", self.q_quantities),
+                ("solution", self.solution),
+                ("socratic_questions", self.socratic_questions),
+                ("calculation_annotated_steps", self.calculation_annotated_steps),
+                ("text_steps", self.text_steps),
+                ("calculation_steps", self.calculation_steps),
+                ("text_step_quantities", self.text_step_quantities),
+                ("calculation_step_quantities", self.calculation_step_quantities),
+            ),
+            indent=4,
+        )
