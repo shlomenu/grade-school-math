@@ -10,10 +10,12 @@ import numeral
 
 nltk.download("punkt")
 
-INT_OR_FLT = r"\d+(?:\.\d+)?"
+INT_OR_FLT = r"\d+(?:\.\d*)?"
 RATIO = rf"{INT_OR_FLT}/{INT_OR_FLT}|{INT_OR_FLT}:{INT_OR_FLT}"
 SOLUTION_QUANT = r"\#\#\#\#\s*(\S+)\s*"
-CALCULATION = r"<<([^<>]+=[^<>]+)>>"
+CALCULATION = r"<<[^<>]+=[^<>]+>>"
+CALCULATION_EXPR = r"<<([^<>]+=[^<>]+)>>"
+HYPHENATION = r"([a-zA-Z])-([a-zA-Z])"
 
 
 class WordProblem:
@@ -29,20 +31,26 @@ class WordProblem:
             self.text_steps,
             self.calculation_steps,
             self.text_step_quantities,
-            self.calculation_step_quantities,
+            self.calculation_step_quantities_lhs,
+            self.calculation_step_quantities_rhs,
         ) = self.decompose_answer(self.a_raw)
+        (
+            self.q_multiplicities,
+            self.text_step_multiplicities,
+            self.unspecified_or_underived_quantities,
+            self.unusued_quantities,
+        ) = self.detect_missing_calculations(
+            self.q_quantities,
+            self.text_step_quantities,
+            self.calculation_step_quantities_lhs,
+            self.calculation_step_quantities_rhs,
+        )
         # (self.program,) = self.assemble_program(
         #     self.missing_calculations,
         #     self.q_quantities,
         #     self.text_step_quantities,
         #     self.calculation_step_quantities,
         #     self.calculation_steps,
-        #     self.solution,
-        # )
-        # self.missing_calculations = self.detect_missing_calculations(
-        #     self.q_quantities,
-        #     self.text_step_quantities,
-        #     self.calculation_step_quantities,
         #     self.solution,
         # )
 
@@ -53,27 +61,28 @@ class WordProblem:
         raw = self.preprocess(raw)
         numeric_quantities, quantities, numeral_seq = [], [], False
         for token, tag in nltk.pos_tag(nltk.tokenize.word_tokenize(raw)):
-            quantity = self.extract_digitized(token.replace(",", ""))
-            if quantity is not None:
-                numeral_seq = False
-                numeric_quantities.extend(quantity)
-                quantities.extend(quantity)
-            elif token in numeral.NUMERAL:
+            if token in numeral.NUMERAL:
                 if not numeral_seq:
                     numeral_seq = True
                     quantities.append([(token, tag)])
                 else:
                     quantities[-1].append((token, tag))
-            elif numeral_seq:
-                numeral_seq = False
-                numbers = self.parse_numeral(quantities[-1])
-                del quantities[-1]
-                if numbers:
+            else:
+                if numeral_seq:
+                    numeral_seq = False
+                    numbers = self.parse_numeral(quantities[-1])
+                    del quantities[-1]
+                    if numbers:
+                        quantities.extend(numbers)
+                numbers = self.extract_digitized(token.replace(",", ""))
+                if numbers is not None:
+                    numeric_quantities.extend(numbers)
                     quantities.extend(numbers)
+            
         return numeric_quantities, quantities
 
     def preprocess(self, s):
-        return re.sub(rf"(?!{INT_OR_FLT})(-)(?!{INT_OR_FLT})", " ", s)
+        return re.sub(HYPHENATION, lambda m: " ".join(m.group(1, 2)), s)
 
     def extract_digitized(self, token) -> List[float]:
         ratio = re.findall(rf"({RATIO})", token)
@@ -91,8 +100,12 @@ class WordProblem:
                 raise ValueError(f"misshapen number: {number}, {token}")
             elif len(number) == 1:
                 return [float(number[0])]
+            
+        return None
 
     def parse_numeral(self, tagged_numerals: List[Tuple[str, str]]) -> List[float]:
+        if len(tagged_numerals) == 0:
+            return []
         numerals, tags = [e[0] for e in tagged_numerals], [
             e[1] for e in tagged_numerals
         ]
@@ -106,7 +119,7 @@ class WordProblem:
                 list(zip(numerals[:i], tags[:i]))
             ) + self.parse_numeral(list(zip(numerals[i:], tags[i:])))
         if len(numerals) == 1:
-            return [numeral.NUMERAL[numerals[0]]]
+            return [float(numeral.NUMERAL[numerals[0]])]
         else:
             if self.cardinal(numerals):
                 return [float(self.safe_word_to_num(" ".join(numerals)))]
@@ -160,19 +173,22 @@ class WordProblem:
             socratic_questions.append(q.strip())
             calculation_annotated_steps.append((a.strip()))
         text_steps, calculation_steps = [], []
-        text_step_quantities, calculation_step_quantities = [], []
+        text_step_quantities, calculation_step_quantities_lhs, calculation_step_quantities_rhs = [], [], []
         for calculation_annotated_step in calculation_annotated_steps:
             text_step = re.sub(CALCULATION, "", calculation_annotated_step)
             text_steps.append(text_step)
             text_step_quantities.append(
                 [float(t) for t in re.findall(INT_OR_FLT, text_step)]
             )
-            calculation_step = re.findall(CALCULATION, calculation_annotated_step)
+            calculation_step = re.findall(CALCULATION_EXPR, calculation_annotated_step)
             calculation_steps.append(calculation_step)
-            quantities = []
+            quantities_lhs, quantities_rhs = [], []
             for c in calculation_step:
-                quantities.extend((float(t) for t in re.findall(INT_OR_FLT, c)))
-            calculation_step_quantities.append(quantities)
+                lhs, rhs = c.split("=")
+                quantities_lhs.append([float(t) for t in re.findall(INT_OR_FLT, lhs)])
+                quantities_rhs.append([float(t) for t in re.findall(INT_OR_FLT, rhs)])
+            calculation_step_quantities_lhs.append(quantities_lhs)
+            calculation_step_quantities_rhs.append(quantities_rhs)
         return (
             solution,
             socratic_questions,
@@ -180,13 +196,56 @@ class WordProblem:
             text_steps,
             calculation_steps,
             text_step_quantities,
-            calculation_step_quantities,
+            calculation_step_quantities_lhs,
+            calculation_step_quantities_rhs,
         )
 
     def detect_missing_calculations(
-        self, q_quantities, text_step_quantities, calculation_step_quantities, solution
+        self, q_quantities, text_step_quantities, calculation_step_quantities_lhs, calculation_step_quantities_rhs
     ):
-        pass
+        try:
+            q_multiplicities = {}
+            for v in q_quantities:
+                if v in q_multiplicities:
+                    q_multiplicities[v] += 1
+                else:
+                    q_multiplicities[v] = 1
+            text_step_multiplicities = {}
+            for vs in text_step_quantities:
+                for v in vs:
+                    if v in text_step_multiplicities:
+                        text_step_multiplicities[v] += 1
+                    else:
+                        text_step_multiplicities[v] = 1
+            calculation_lhs_values = set()
+            for vss in calculation_step_quantities_lhs:
+                for vs in vss:
+                    for v in vs:
+                        calculation_lhs_values.add(v)
+            calculation_rhs_values = set()
+            for vss in calculation_step_quantities_rhs:
+                for vs in vss:
+                    for v in vs:
+                        calculation_rhs_values.add(v)
+            q_values = set(q_multiplicities.keys())
+            text_step_values = set(text_step_multiplicities.keys())
+            specified = q_values.intersection(text_step_values)
+            unspecified_or_underived_or_derived = \
+                text_step_values - q_values
+            derived = unspecified_or_underived_or_derived.intersection(
+                calculation_rhs_values)
+            unspecified_or_underived = \
+                unspecified_or_underived_or_derived - derived
+            unused = specified - calculation_lhs_values
+            return (
+                q_multiplicities,
+                text_step_multiplicities,
+                unspecified_or_underived,
+                unused,
+            )
+        except Exception as e:
+            print(self)
+            raise e
 
     def assemble_program(
         self,
@@ -228,7 +287,12 @@ class WordProblem:
                 ("text_steps", self.text_steps),
                 ("calculation_steps", self.calculation_steps),
                 ("text_step_quantities", self.text_step_quantities),
-                ("calculation_step_quantities", self.calculation_step_quantities),
+                ("calculation_step_quantities_lhs", self.calculation_step_quantities_lhs),
+                ("calculation_step_quantities_rhs", self.calculation_step_quantities_rhs),
+                ("q_multiplicities", self.q_multiplicities), 
+                ("text_step_multiplicities", self.text_step_multiplicities),
+                ("unspecified_or_underived_quantities", self.unspecified_or_underived_quantities),
+                ("unused_quantities", self.unusued_quantities),
             ),
             indent=4,
         )
